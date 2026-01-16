@@ -4,17 +4,17 @@ FROM python:3.11-slim
 # Set the working directory inside the container
 WORKDIR /app
 
-# Copy your requirements and main.py into the container
-# By copying requirements first, Railway can cache your layers (faster redeploys)
+# Copy requirements first to leverage Docker cache (faster redeploys)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your code (your fused main.py)
+# Copy the rest of your code
 COPY . .
 
-# Railway uses port 8080 by default for many services
+# In 2026, Railway ignores EXPOSE in favor of its own dynamic networking, 
+# but keeping it as a reference doesn't hurt.
 EXPOSE 8080
 
-# The command to start your app
-# We use 0.0.0.0 so it is accessible from the outside world
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# CRITICAL: Use shell form (no brackets) to ensure $PORT is expanded.
+# Railway injects $PORT at runtime. Defaulting to 8080 for local testing.
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
