@@ -1,62 +1,84 @@
 import os
 import re
 import httpx
+import asyncio
 from fastapi import FastAPI, HTTPException, Header, Depends
-from bs4 import BeautifulSoup
+from typing import List, Dict
 
-app = FastAPI(title="LeadRadar Unified API")
+app = FastAPI(title="LeadRadar Unified API - 2026 Edition")
 
 # --- SECURITY CONFIG ---
-# This matches the secret you will set in Railway and RapidAPI
+# Set this in Railway Variables as RAPIDAPI_PROXY_SECRET
 PROXY_SECRET = os.getenv("RAPIDAPI_PROXY_SECRET", "default_secret_for_local_test")
 
 async def verify_rapidapi(x_rapidapi_proxy_secret: str = Header(None)):
     if x_rapidapi_proxy_secret != PROXY_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized: Secret Mismatch")
 
-# --- SIGNATURE DATABASES ---
+# --- TECH SIGNATURES (Pre-compiled for Railway Performance) ---
 TECH_SIGNATURES = {
-    "E-commerce": {"Shopify": r"cdn\.shopify\.com", "WooCommerce": r"woocommerce"},
-    "Analytics": {"Google Analytics": r"googletagmanager", "Meta Pixel": r"facebook\.net"},
-    "Marketing": {"HubSpot": r"js\.hs-scripts\.com", "Klaviyo": r"static\.klaviyo\.com"}
+    "AI_LLM": {
+        "OpenAI": re.compile(r"openai\.com", re.I),
+        "Anthropic": re.compile(r"anthropic\.com", re.I),
+        "LangChain": re.compile(r"langchain", re.I),
+        "Pinecone": re.compile(r"pinecone\.io", re.I)
+    },
+    "E-commerce": {
+        "Shopify": re.compile(r"cdn\.shopify\.com", re.I),
+        "WooCommerce": re.compile(r"woocommerce", re.I),
+        "Magento": re.compile(r"magento", re.I)
+    },
+    "Marketing": {
+        "HubSpot": re.compile(r"js\.hs-scripts\.com", re.I),
+        "Klaviyo": re.compile(r"static\.klaviyo\.com", re.I)
+    }
 }
 
 HIRING_KEYWORDS = ["hiring", "careers", "open roles", "join our team", "vacancies"]
+STOCK_KEYWORDS = ["out of stock", "sold out", "unavailable", "backorder"]
 
 # --- CORE LOGIC ---
 
-async def perform_scan(url: str):
+async def perform_scan(url: str) -> Dict:
     if not url.startswith("http"):
         url = f"https://{url}"
         
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+    # Using a professional User-Agent to avoid immediate blocks
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LeadRadarBot/1.0"
+    }
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
         try:
-            # 1. Fetch Page
             response = await client.get(url)
-            html = response.text.lower()
-            headers = str(response.headers).lower()
-            combined = html + headers
+            # Raise exception for 4xx/5xx errors
+            response.raise_for_status()
+            
+            html = response.text
+            lower_content = html.lower()
+            resp_headers = str(response.headers).lower()
+            combined_search_area = html + resp_headers
 
-            # 2. Technographics (#8)
-            tech = []
+            # 1. Technographics Scan
+            tech_found = []
             for cat, techs in TECH_SIGNATURES.items():
-                for name, pat in techs.items():
-                    if re.search(pat, combined):
-                        tech.append({"name": name, "category": cat})
+                for name, pattern in techs.items():
+                    if pattern.search(combined_search_area):
+                        tech_found.append({"name": name, "category": cat})
 
-            # 3. Hiring Signals (#4)
-            hiring = any(word in combined for word in HIRING_KEYWORDS)
-
-            # 4. StockWatch (#10)
-            stockout = any(word in html for word in ["out of stock", "sold out", "unavailable"])
+            # 2. Hiring & Stock Signals
+            hiring = any(word in lower_content for word in HIRING_KEYWORDS)
+            stockout = any(word in lower_content for word in STOCK_KEYWORDS)
 
             return {
                 "url": url,
-                "tech_stack": tech,
+                "tech_stack": tech_found,
                 "hiring_signal": hiring,
                 "stockwatch_alert": stockout,
                 "status": "success"
             }
+        except httpx.HTTPStatusError as e:
+            return {"status": "error", "message": f"Site blocked or unavailable: {e.response.status_code}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -64,11 +86,12 @@ async def perform_scan(url: str):
 
 @app.get("/")
 def health_check():
-    return {"status": "LeadRadar Online"}
+    return {"status": "LeadRadar Online", "version": "2026.1"}
 
 @app.get("/analyze")
 async def analyze(url: str, _ = Depends(verify_rapidapi)):
     result = await perform_scan(url)
     if result.get("status") == "error":
-        raise HTTPException(status_code=500, detail=result["message"])
+        # We still return 200 to RapidAPI so you can see the error message in the JSON
+        return result
     return result
