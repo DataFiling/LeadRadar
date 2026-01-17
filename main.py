@@ -1,111 +1,52 @@
-import os
-import re
-import httpx
-from fastapi import FastAPI, HTTPException, Header, Depends
-from typing import Dict, List, Optional
-
-app = FastAPI(title="LeadRadar Unified API - 2026 Production")
-
-# --- SECURITY CONFIG ---
-# Set this in your Railway Variables as RAPIDAPI_PROXY_SECRET
-# It must match the secret found in your RapidAPI Provider Dashboard
-PROXY_SECRET = os.getenv("RAPIDAPI_PROXY_SECRET", "default_secret_for_local_test")
-
-async def verify_rapidapi(
-    # We use an alias to ensure FastAPI looks for the exact header RapidAPI sends
-    x_rapidapi_proxy_secret: Optional[str] = Header(None, alias="X-RapidAPI-Proxy-Secret")
-):
-    if not x_rapidapi_proxy_secret or x_rapidapi_proxy_secret != PROXY_SECRET:
-        raise HTTPException(
-            status_code=403, 
-            detail="Unauthorized: Secret Mismatch. Verify Railway Env Variables."
+async def run_scrape_logic(zip_code: str):
+    async with async_playwright() as p:
+        # Launch with Stealth Args
+        browser = await p.chromium.launch(
+            headless=True, 
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
         )
-
-# --- SIGNATURE DATABASES (Pre-compiled for efficiency) ---
-TECH_SIGNATURES = {
-    "AI_LLM": {
-        "OpenAI": re.compile(r"openai\.com", re.I),
-        "Anthropic": re.compile(r"anthropic\.com", re.I),
-        "LangChain": re.compile(r"langchain", re.I),
-        "Pinecone": re.compile(r"pinecone\.io", re.I),
-        "Vercel AI": re.compile(r"sdk\.vercel\.ai", re.I)
-    },
-    "E-commerce": {
-        "Shopify": re.compile(r"cdn\.shopify\.com", re.I),
-        "WooCommerce": re.compile(r"woocommerce", re.I),
-        "BigCommerce": re.compile(r"mybigcommerce\.com", re.I)
-    },
-    "Analytics": {
-        "Google Analytics": re.compile(r"googletagmanager", re.I),
-        "Meta Pixel": re.compile(r"facebook\.net", re.I),
-        "Hotjar": re.compile(r"static\.hotjar\.com", re.I)
-    }
-}
-
-HIRING_KEYWORDS = ["hiring", "careers", "open roles", "join our team", "vacancies"]
-STOCK_KEYWORDS = ["out of stock", "sold out", "unavailable", "backorder"]
-
-# --- CORE LOGIC ---
-
-async def perform_scan(url: str) -> Dict:
-    if not url.startswith("http"):
-        url = f"https://{url}"
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        url = f"https://www.realtor.com/realestateandhomes-search/{zip_code}"
         
-    # Professional User-Agent to avoid basic bot blocks
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LeadRadarBot/1.1 (Scraper; Railway Hosted)"
-    }
-
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers=headers) as client:
         try:
-            response = await client.get(url)
-            response.raise_for_status() # Trigger error for 4xx/5xx responses
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3) 
+            await page.wait_for_selector("[data-testid='property-card']", timeout=20000)
             
-            html = response.text
-            lower_content = html.lower()
-            resp_headers = str(response.headers).lower()
-            combined_search_area = html + resp_headers
+            listings = await page.query_selector_all("[data-testid='property-card']")
+            leads = []
+            
+            for listing in listings[:10]:
+                # Core Elements
+                address_el = await listing.query_selector("[data-label='pc-address']")
+                price_el = await listing.query_selector("[data-label='pc-price']")
+                
+                # NEW: Metadata Elements (Sqft and Days on Market)
+                # These often appear in a list; we'll grab the specific labels
+                sqft_el = await listing.query_selector("[data-label='pc-meta-sqft']")
+                dom_el = await listing.query_selector("[data-label='pc-meta-dom']") # Note: Selector may vary based on region
+                
+                if address_el and price_el:
+                    addr = await address_el.inner_text()
+                    pri = await price_el.inner_text()
+                    
+                    # Extraction with Fallbacks
+                    sqft = await sqft_el.inner_text() if sqft_el else "N/A"
+                    dom = await dom_el.inner_text() if dom_el else "New"
 
-            # 1. Technographics Scan
-            tech_found = []
-            for cat, techs in TECH_SIGNATURES.items():
-                for name, pattern in techs.items():
-                    if pattern.search(combined_search_area):
-                        tech_found.append({"name": name, "category": cat})
+                    leads.append({
+                        "address": addr.strip().replace('\n', ' '),
+                        "price": pri.strip(),
+                        "sqft": sqft.strip(),
+                        "days_on_market": dom.strip()
+                    })
+            
+            await browser.close()
+            return leads
 
-            # 2. Signals
-            hiring = any(word in lower_content for word in HIRING_KEYWORDS)
-            stockout = any(word in lower_content for word in STOCK_KEYWORDS)
-
-            return {
-                "url": url,
-                "tech_stack": tech_found,
-                "hiring_signal": hiring,
-                "stockwatch_alert": stockout,
-                "status": "success"
-            }
-        except httpx.HTTPStatusError as e:
-            return {"status": "error", "message": f"Site blocked or unavailable: {e.response.status_code}"}
         except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-# --- ENDPOINTS ---
-
-@app.get("/")
-def health_check():
-    """Confirms the service is live and reachable by Railway/RapidAPI."""
-    return {"status": "LeadRadar Online", "version": "2026.1"}
-
-@app.get("/analyze")
-async def analyze(url: str, _ = Depends(verify_rapidapi)):
-    """The main scraper endpoint. Protected by RapidAPI Proxy Secret."""
-    result = await perform_scan(url)
-    if result.get("status") == "error":
-        return result # Return the error detail in JSON format
-    return result
-
-if __name__ == "__main__":
-    import uvicorn
-    # Local testing fallback
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+            await browser.close()
+            return {"error": "Scrape failed", "details": str(e)}
