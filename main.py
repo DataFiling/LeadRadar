@@ -1,72 +1,130 @@
 import os
 import re
 import asyncio
+import subprocess
+import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from playwright.async_api import async_playwright
 
+# --- INITIALIZATION ---
+# Ensures the browser is ready on Railway deployment
+try:
+    subprocess.run(["playwright", "install", "--with-deps", "chromium"], check=True)
+except Exception as e:
+    print(f"Browser check: {e}")
+
 app = FastAPI(title="LeadRadar Pro")
 
-# --- BANDWIDTH PROTECTOR ---
+# --- GLOBAL CONFIG & GUARDS ---
+# Limit server to 3 browsers at once to protect RAM
+MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
+
+SOCIAL_PATTERNS = {
+    "LinkedIn": re.compile(r"linkedin\.com/(company|in)/[a-z0-9\-_]+", re.I),
+    "X_Twitter": re.compile(r"(twitter\.com|x\.com)/[a-z0-9\-_]+", re.I),
+    "Instagram": re.compile(r"instagram\.com/[a-z0-9\-_]+", re.I)
+}
+EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
+
+# --- RESOURCE BLOCKER (Bandwidth Saver) ---
 async def intercept_route(route):
-    """
-    Aborts requests for unnecessary assets. 
-    This cuts data usage by up to 90% and speeds up the 'Watcher'.
-    """
-    # We block images, media (video/audio), fonts, and styles.
-    # We keep 'script' and 'document' because we need them for data extraction.
+    """Aborts heavy assets to keep bandwidth < 1MB per scan."""
     if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
         await route.abort()
     else:
         await route.continue_()
 
+# --- THE WATCHER ENGINE ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
+        # Launch with Stealth Args
         browser = await p.chromium.launch(
-            headless=True, 
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-
-        # 1. ATTACH THE BANDWIDTH PROTECTOR
-        # This is the "Kenotic Shift" - emptying the noise to find the signal.
+        
+        # Apply the Bandwidth Guard
         await page.route("**/*", intercept_route)
-
+        
+        # Inject Stealth Script
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
-
+        
         try:
-            # We use 'domcontentloaded' because we don't need to wait for heavy assets anymore
+            # Fast load for data extraction
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Allow 2 seconds for vital JS-driven data to hydrate
-            await asyncio.sleep(2) 
-            
+            await asyncio.sleep(2) # Allow JS hydration
             html = await page.content()
             
-            # --- EXTRACTION LOGIC ---
-            # (Hiring signals, Tech Stack, Emails, and Scoring logic here)
-            
-            # Example Score (Logic from previous steps applies here)
-            final_score = 85 
+            # 1. REAL ESTATE SCRAPE (IF ZIP)
+            leads = []
+            if is_zip:
+                cards = await page.query_selector_all("[data-testid='property-card']")
+                for card in cards[:10]:
+                    addr_el = await card.query_selector("[data-label='pc-address']")
+                    pri_el = await card.query_selector("[data-label='pc-price']")
+                    if addr_el and pri_el:
+                        leads.append({
+                            "address": (await addr_el.inner_text()).strip(),
+                            "price": (await pri_el.inner_text()).strip(),
+                            "sqft": (await (await card.query_selector("[data-label='pc-meta-sqft']")).inner_text() if await card.query_selector("[data-label='pc-meta-sqft']") else "N/A"),
+                            "days_on_market": (await (await card.query_selector("[data-label='pc-meta-dom']")).inner_text() if await card.query_selector("[data-label='pc-meta-dom']") else "New")
+                        })
 
+            # 2. BUSINESS SIGNALS
+            tech_found = []
+            if "shopify" in html.lower(): tech_found.append("Shopify")
+            if "facebook.net" in html.lower(): tech_found.append("Meta Pixel")
+            
+            hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings"])
+            
+            # 3. CONTACTS & SOCIALS
+            emails = list(set(EMAIL_PATTERN.findall(html)))[:3]
+            socials = {k: v.search(html).group(0) for k, v in SOCIAL_PATTERNS.items() if v.search(html)}
+
+            # 4. LEAD SCORING ENGINE
+            score = (len(tech_found) * 15) + (35 if hiring else 0) + (len(socials) * 5) + (15 if emails else 0)
+            
             await browser.close()
             return {
                 "url": url,
-                "lead_score": final_score,
+                "lead_score": min(score, 100),
+                "hiring_signal": hiring,
+                "tech_stack": tech_found,
+                "social_profiles": socials,
+                "contacts": {"emails": emails},
+                "real_estate_leads": leads if is_zip else None,
                 "status": "success",
-                "bandwidth_optimized": True
+                "optimized": True
             }
-            
         except Exception as e:
             await browser.close()
-            return {"error": str(e)}
+            return {"error": "Observation failed", "details": str(e)}
 
-# --- ENDPOINT ---
+# --- API ENDPOINTS ---
+
 @app.get("/analyze")
-async def analyze(url: str, request: Request):
-    # Verify Proxy Secret from Railway Env
+async def analyze_endpoint(url: str, request: Request):
+    # RapidAPI Proxy Security
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    return await run_lead_radar(url)
+        raise HTTPException(status_code=403, detail="Unauthorized Access")
+    
+    # Apply Rate Guard (Semaphore)
+    async with MAX_CONCURRENT_SCANS:
+        return await run_lead_radar(url, is_zip=False)
+
+@app.get("/leads/{zip_code}")
+async def zip_leads_endpoint(zip_code: str, request: Request):
+    if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
+        raise HTTPException(status_code=403, detail="Unauthorized Access")
+    
+    async with MAX_CONCURRENT_SCANS:
+        return await run_lead_radar(zip_code, is_zip=True)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
