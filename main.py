@@ -5,15 +5,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
-app = FastAPI(title="LeadRadar Pro - High Fidelity")
+app = FastAPI(title="LeadRadar Pro - Total Intelligence")
 
-# --- THE SELECTIVE WATCHER PATTERNS ---
-# This Regex now ignores common image artifacts and looks for standard TLDs
-EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com|net|org|io|gov|edu|biz)', re.I)
+# --- PATTERN RECOGNITION ---
+# Refined to ignore image artifacts like @2x
+EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com|net|org|io|biz|co)', re.I)
+AD_PIXELS = {
+    "Facebook Ads": "fbevents.js",
+    "Google Ads": "googletagmanager.com",
+    "LinkedIn Ads": "snap.licdn.com"
+}
 
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Intelligence Online", "mode": "B2B_High_Fidelity"}
+    return {"status": "LeadRadar Online", "mode": "B2B_Total_Intelligence"}
 
 async def run_analysis(url: str):
     if not url.startswith("http"): url = "https://" + url
@@ -22,36 +27,39 @@ async def run_analysis(url: str):
         browser = None
         try:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context(user_agent="Mozilla/5.0 LeadRadar/3.2")
+            context = await browser.new_context(user_agent="Mozilla/5.0 LeadRadar/3.3")
             page = await context.new_page()
             
-            # Speeding up the scan by ignoring images and fonts entirely
-            await page.route("**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf}", lambda route: route.abort())
+            # BLOCK IMAGES: Prevents logo@2x.png from being misread as an email
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,webp}", lambda route: route.abort())
             
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             html = await page.content()
             
-            # --- 1. FILTERED CONTACT EXTRACTION ---
-            found = EMAIL_REGEX.findall(html)
-            # Kill anything that looks like a Retina asset (logo@2x, etc.)
-            clean_emails = [e.lower() for e in found if not any(x in e.lower() for x in ['@1x', '@2x', '@3x'])]
-            emails = list(set(clean_emails))[:5]
+            # --- 1. CONTACT EXTRACTION ---
+            emails = list(set([e.lower() for e in EMAIL_REGEX.findall(html) if "@" in e and not any(x in e for x in ["@1x", "@2x", "@3x"])]))[:5]
 
-            # --- 2. THE NEW "STALE" SIGNAL (The Leads Replacement) ---
-            # Instead of Real Estate, we find "Stale" Websites.
-            # If the copyright is 2023 or older, it's a hot lead for a redesign.
-            is_stale = False
-            if "©" in html or "Copyright" in html:
-                if not any(yr in html for yr in ["2024", "2025", "2026"]):
-                    is_stale = True
+            # --- 2. ADVERTISING & TECH SIGNALS ---
+            ads_detected = [name for name, snippet in AD_PIXELS.items() if snippet in html.lower()]
+            
+            # --- 3. SEO & PAIN POINT AUDIT ---
+            is_stale = "2026" not in html and "2025" not in html if "©" in html else False
+            missing_h1 = await page.locator('h1').count() == 0
+            has_lead_magnet = any(x in html.lower() for x in ["subscribe", "newsletter", "download", "get a quote"])
 
             await browser.close()
             return {
                 "url": url,
                 "contacts": {"emails": emails},
-                "growth_signals": {
-                    "stale_website_alert": is_stale,
-                    "hiring": "hiring" in html.lower() or "careers" in html.lower()
+                "marketing": {
+                    "ads_detected": ads_detected,
+                    "has_budget_signal": len(ads_detected) > 0,
+                    "lead_capture_found": has_lead_magnet
+                },
+                "technical_audit": {
+                    "is_stale_website": is_stale,
+                    "missing_h1_seo_tag": missing_h1,
+                    "security": "HTTPS" if url.startswith("https") else "INSECURE"
                 },
                 "status": "success"
             }
