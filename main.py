@@ -1,70 +1,59 @@
 import os
 import re
 import asyncio
-import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
-app = FastAPI(title="LeadRadar Pro - Premium Intelligence")
+app = FastAPI(title="LeadRadar Pro - High Fidelity")
 
-# --- EXPANDED TECH & SIGNAL PATTERNS ---
-TECH_MAP = {
-    "E-commerce": {"Shopify": "shopify.com", "WooCommerce": "wp-content/plugins/woocommerce"},
-    "Marketing": {"HubSpot": "hs-scripts.com", "Mailchimp": "chimpstatic.com", "Klaviyo": "klaviyo.com"},
-    "Analytics": {"Google Analytics": "googletagmanager.com", "Facebook Pixel": "fbevents.js", "Hotjar": "static.hotjar.com"},
-    "Frameworks": {"React": "_next/static", "Vue": "vue.js", "Elementor": "elementor"}
-}
+# --- THE SELECTIVE WATCHER PATTERNS ---
+# This Regex now ignores common image artifacts and looks for standard TLDs
+EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com|net|org|io|gov|edu|biz)', re.I)
 
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Premium Online", "version": "3.1.0"}
+    return {"status": "LeadRadar Intelligence Online", "mode": "B2B_High_Fidelity"}
 
-async def run_premium_analysis(url: str):
+async def run_analysis(url: str):
     if not url.startswith("http"): url = "https://" + url
 
     async with async_playwright() as p:
         browser = None
         try:
-            start_time = time.time()
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context(user_agent="Mozilla/5.0 LeadRadar/3.0")
+            context = await browser.new_context(user_agent="Mozilla/5.0 LeadRadar/3.2")
             page = await context.new_page()
             
-            # Navigate and measure load speed
-            response = await page.goto(url, wait_until="networkidle", timeout=60000)
-            load_speed = round(time.time() - start_time, 2)
+            # Speeding up the scan by ignoring images and fonts entirely
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf}", lambda route: route.abort())
             
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             html = await page.content()
             
-            # --- 1. SEO AUDIT LOGIC ---
-            seo = {
-                "title": await page.title(),
-                "has_meta_description": await page.locator('meta[name="description"]').count() > 0,
-                "has_h1": await page.locator('h1').count() > 0,
-                "missing_img_alts": await page.eval_on_selector_all('img:not([alt])', 'imgs => imgs.length'),
-                "is_secure": url.startswith("https")
-            }
-            
-            # --- 2. ENHANCED TECHNOGRAPHICS ---
-            detected_tech = []
-            for category, providers in TECH_MAP.items():
-                for name, snippet in providers.items():
-                    if snippet in html.lower():
-                        detected_tech.append({"name": name, "category": category})
-            
-            # --- 3. GROWTH & CONTACTS ---
-            emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html)))[:3]
-            hiring = any(w in html.lower() for w in ["careers", "hiring", "openings"])
+            # --- 1. FILTERED CONTACT EXTRACTION ---
+            found = EMAIL_REGEX.findall(html)
+            # Kill anything that looks like a Retina asset (logo@2x, etc.)
+            clean_emails = [e.lower() for e in found if not any(x in e.lower() for x in ['@1x', '@2x', '@3x'])]
+            emails = list(set(clean_emails))[:5]
+
+            # --- 2. THE NEW "STALE" SIGNAL (The Leads Replacement) ---
+            # Instead of Real Estate, we find "Stale" Websites.
+            # If the copyright is 2023 or older, it's a hot lead for a redesign.
+            is_stale = False
+            if "©" in html or "Copyright" in html:
+                if not any(yr in html for yr in ["2024", "2025", "2026"]):
+                    is_stale = True
 
             await browser.close()
             return {
                 "url": url,
-                "performance": {"load_speed_seconds": load_speed},
-                "seo_audit": seo,
-                "technographics": detected_tech,
-                "signals": {"hiring": hiring, "emails": emails},
-                "lead_score": (len(detected_tech) * 10) + (30 if seo["has_meta_description"] is False else 0)
+                "contacts": {"emails": emails},
+                "growth_signals": {
+                    "stale_website_alert": is_stale,
+                    "hiring": "hiring" in html.lower() or "careers" in html.lower()
+                },
+                "status": "success"
             }
         except Exception as e:
             if browser: await browser.close()
@@ -73,7 +62,7 @@ async def run_premium_analysis(url: str):
 @app.get("/analyze")
 async def analyze_endpoint(url: str, request: Request):
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        return JSONResponse(status_code=403, content={"detail": "Unauthorized"})
+        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
     
-    res = await run_premium_analysis(url)
+    res = await run_analysis(url)
     return JSONResponse(status_code=200 if "error" not in res else 400, content=res)
