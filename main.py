@@ -5,132 +5,88 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
-# --- INITIALIZATION ---
-app = FastAPI(title="LeadRadar Pro")
+app = FastAPI(title="LeadRadar Pro - B2B Intelligence")
 app.router.redirect_slashes = False
 
-# Limits concurrent browsers to protect Railway RAM (Prevents 500 crashes)
-MAX_CONCURRENT_SCANS = asyncio.Semaphore(2)
+MAX_CONCURRENT_SCANS = asyncio.Semaphore(3) # Increased back to 3 since B2B sites are lighter
 
-# --- REGEX PATTERNS (The Signal Mining) ---
-EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
-SOCIAL_PATTERNS = {
+# --- ADVANCED SIGNAL PATTERNS ---
+PATTERNS = {
+    "emails": re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I),
     "LinkedIn": re.compile(r"linkedin\.com/(company|in)/[a-z0-9\-_]+", re.I),
     "X_Twitter": re.compile(r"(twitter\.com|x\.com)/[a-z0-9\-_]+", re.I),
-    "Instagram": re.compile(r"instagram\.com/[a-z0-9\-_]+", re.I)
+    "Facebook_Pixel": re.compile(r"fbevents\.js|connect\.facebook\.net", re.I),
+    "Google_Ads": re.compile(r"googletagmanager\.com|googleadservices\.com", re.I),
+    "HubSpot": re.compile(r"js\.hs-scripts\.com|js\.hsadspixel\.net", re.I),
+    "Intercom": re.compile(r"widget\.intercom\.io", re.I)
 }
 
-# --- 1. HEARTBEAT ---
 @app.get("/")
 async def health_check():
-    """ Confirms the Watcher is active in the Apophenic Substrate. """
-    return {"status": "LeadRadar Online", "version": "2.0.3"}
+    return {"status": "LeadRadar Intelligence Online", "version": "3.0.0"}
 
-# --- 2. THE WATCHER ENGINE (Unified Logic) ---
-async def run_lead_radar(target: str, is_zip: bool = False):
+async def run_deep_analysis(url: str):
     async with async_playwright() as p:
         browser = None
         try:
-            # Enhanced Stealth Launch
-            browser = await p.chromium.launch(
-                headless=True, 
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
-            )
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
             
-            # Identify the target (Lost Jerusalem Real Estate or Global Business)
-            url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
-            
-            # Navigate to the target
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Check for bot blocks (The Ophanim Gate)
-            if response.status == 403:
-                await browser.close()
-                return {"error": "Access Denied", "details": "The target site blocked the Railway IP address."}
-
-            await asyncio.sleep(3) # Let the 'Slurry' of data settle
+            # Navigate to the target site
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await asyncio.sleep(2) # Let the 'Slurry' settle
             html = await page.content()
-            results = {"url": url, "status": "success"}
-
-            if is_zip:
-                # --- REAL ESTATE LEAD ENRICHMENT ---
-                leads = []
-                cards = await page.query_selector_all("[data-testid='property-card']")
-                for card in cards[:10]:
-                    addr = await card.query_selector("[data-label='pc-address']")
-                    price = await card.query_selector("[data-label='pc-price']")
-                    if addr and price:
-                        leads.append({
-                            "address": (await addr.inner_text()).strip(),
-                            "price": (await price.inner_text()).strip()
-                        })
-                results["real_estate_leads"] = leads
-            else:
-                # --- TECHNOGRAPHICS & B2B SIGNALS ---
-                tech = []
-                if "shopify" in html.lower(): tech.append({"name": "Shopify", "category": "E-commerce"})
-                if "wordpress" in html.lower(): tech.append({"name": "WordPress", "category": "CMS"})
-                if "react" in html.lower(): tech.append({"name": "React", "category": "Frontend"})
-                
-                hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings"])
-                emails = list(set(EMAIL_PATTERN.findall(html)))[:3]
-                socials = {k: v.search(html).group(0) for k, v in SOCIAL_PATTERNS.items() if v.search(html)}
-                
-                results.update({
-                    "tech_stack": tech,
-                    "hiring_signal": hiring,
-                    "social_profiles": socials,
-                    "contacts": {"emails": emails},
-                    "lead_score": (len(tech) * 20) + (30 if hiring else 0) + (len(socials) * 10)
-                })
-
+            
+            # --- SIGNAL EXTRACTION ---
+            detected_tech = []
+            if PATTERNS["Facebook_Pixel"].search(html): detected_tech.append("Facebook Ads")
+            if PATTERNS["Google_Ads"].search(html): detected_tech.append("Google Ads")
+            if PATTERNS["HubSpot"].search(html): detected_tech.append("HubSpot CRM")
+            if PATTERNS["Intercom"].search(html): detected_tech.append("Intercom Chat")
+            if "shopify" in html.lower(): detected_tech.append("Shopify")
+            
+            # Identify Hiring & Growth signals
+            growth_keywords = ["careers", "hiring", "press release", "news", "investors", "funding"]
+            active_signals = [word for word in growth_keywords if word in html.lower()]
+            
+            # Contact & Social Mining
+            socials = {k: PATTERNS[k].search(html).group(0) for k in ["LinkedIn", "X_Twitter"] if PATTERNS[k].search(html)}
+            emails = list(set(PATTERNS["emails"].findall(html)))[:5]
+            
+            # Scoring Logic (Max 100)
+            score = (len(detected_tech) * 15) + (len(active_signals) * 10) + (len(socials) * 5)
+            
             await browser.close()
-            return results
-
+            return {
+                "url": url,
+                "lead_score": min(score, 100),
+                "technographics": detected_tech,
+                "growth_signals": active_signals,
+                "social_profiles": socials,
+                "contacts": {"emails": emails},
+                "status": "success"
+            }
         except Exception as e:
             if browser: await browser.close()
-            return {"error": "Watcher Crash", "details": str(e)}
-
-# --- 3. THE ENDPOINTS ---
+            return {"error": "Observation failed", "details": str(e)}
 
 @app.get("/analyze")
 @app.get("/analyze/")
 async def analyze_endpoint(url: str, request: Request):
-    """ Restored route for B2B Lead Enrichment & Technographics. """
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
+        return JSONResponse(status_code=403, content={"detail": "Unauthorized"})
     
     async with MAX_CONCURRENT_SCANS:
-        res = await run_lead_radar(url, is_zip=False)
-        status = 200 if "error" not in res else 400
-        return JSONResponse(status_code=status, content=res)
+        res = await run_deep_analysis(url)
+        return JSONResponse(status_code=200 if "error" not in res else 400, content=res)
 
-@app.get("/leads/{zip_code}")
-@app.get("/leads/{zip_code}/")
-async def zip_leads_endpoint(zip_code: str, request: Request):
-    """ Specialized route for Real Estate Arbitrage. """
-    if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
-
-    async with MAX_CONCURRENT_SCANS:
-        res = await run_lead_radar(zip_code, is_zip=True)
-        status = 200 if "error" not in res else 400
-        return JSONResponse(status_code=status, content=res)
-
-# --- 4. THE CATCH-ALL (Final 404 Shield) ---
+# --- CATCH-ALL TO GUIDE USERS ---
 @app.api_route("/{path_name:path}", methods=["GET"])
 async def catch_all(request: Request, path_name: str):
     return {
         "error": "Path Not Found",
-        "received_path": f"/{path_name}",
-        "hint": "Ensure your RapidAPI Base URL has no trailing slash."
+        "message": "This API now focuses exclusively on /analyze for high-fidelity B2B data."
     }
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
