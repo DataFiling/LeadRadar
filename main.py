@@ -7,13 +7,13 @@ from fastapi import FastAPI, Request, HTTPException
 from playwright.async_api import async_playwright
 
 # --- INITIALIZATION ---
-# Pre-installing browser for Railway's Linux environment
 try:
+    # Pre-installs browsers on Railway's environment
     subprocess.run(["playwright", "install", "--with-deps", "chromium"], check=True)
 except Exception as e:
     print(f"Browser check: {e}")
 
-# IMPORTANT: strict_slashes=False ensures that /leads/90210 and /leads/90210/ are identical
+# strict_slashes=False is critical for preventing 404s from proxy redirects
 app = FastAPI(title="LeadRadar Pro")
 app.router.redirect_slashes = False
 
@@ -27,13 +27,21 @@ SOCIAL_PATTERNS = {
 }
 EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
 
-# --- 1. THE HEARTBEAT (Fixes Railway Healthcheck) ---
+# --- 1. HEARTBEAT & DEBUG (Vital for fixing 404s) ---
+
 @app.get("/")
 async def health_check():
+    """Confirms the server is alive for Railway."""
+    return {"status": "LeadRadar Online", "version": "2026.1"}
+
+@app.get("/debug")
+async def debug_route(request: Request):
+    """The 'Riddle Solver': Shows exactly what path the server is seeing."""
     return {
-        "status": "LeadRadar Online",
-        "version": "2026.1",
-        "mode": "High Performance"
+        "received_path": request.url.path,
+        "method": request.method,
+        "headers": {k: v for k, v in request.headers.items() if "secret" not in k.lower()},
+        "query_params": dict(request.query_params)
     }
 
 # --- 2. BANDWIDTH PROTECTOR ---
@@ -58,7 +66,7 @@ async def run_lead_radar(target: str, is_zip: bool = False):
         await page.route("**/*", intercept_route)
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        # Lost Jerusalem Property Search or Standard Analyze
+        # Real Estate Search or Standard Business Analyze
         url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
         
         try:
@@ -68,6 +76,7 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             
             leads = []
             if is_zip:
+                # Scrape property cards for the $15 Real Estate lead tier
                 cards = await page.query_selector_all("[data-testid='property-card']")
                 for card in cards[:10]:
                     addr_el = await card.query_selector("[data-label='pc-address']")
@@ -78,9 +87,7 @@ async def run_lead_radar(target: str, is_zip: bool = False):
                             "price": (await pri_el.inner_text()).strip()
                         })
 
-            tech_found = []
-            if "shopify" in html.lower(): tech_found.append({"name": "Shopify", "category": "E-commerce"})
-            
+            tech_found = [{"name": "Shopify", "category": "E-commerce"}] if "shopify" in html.lower() else []
             hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings"])
             emails = list(set(EMAIL_PATTERN.findall(html)))[:3]
             socials = {k: v.search(html).group(0) for k, v in SOCIAL_PATTERNS.items() if v.search(html)}
@@ -112,11 +119,9 @@ async def analyze_endpoint(url: str, request: Request):
     async with MAX_CONCURRENT_SCANS:
         return await run_lead_radar(url, is_zip=False)
 
-# THE FIX: Dual-route mapping for zip codes
 @app.get("/leads/{zip_code}")
 @app.get("/leads/{zip_code}/")
 async def zip_leads_endpoint(zip_code: str, request: Request):
-    # Verify the secret matches your Railway environment variable
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
         raise HTTPException(status_code=403, detail="Unauthorized")
     
@@ -124,6 +129,5 @@ async def zip_leads_endpoint(zip_code: str, request: Request):
         return await run_lead_radar(zip_code, is_zip=True)
 
 if __name__ == "__main__":
-    # Ensure PORT is 8080 in Railway Variables
     port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
