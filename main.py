@@ -5,11 +5,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
+# --- INITIALIZATION ---
 app = FastAPI(title="LeadRadar Pro")
 app.router.redirect_slashes = False
 
-# --- CONFIGURATION ---
+# Limits concurrent browsers to protect Railway RAM (Prevents 500 crashes)
 MAX_CONCURRENT_SCANS = asyncio.Semaphore(2)
+
+# --- REGEX PATTERNS (The Signal Mining) ---
 EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
 SOCIAL_PATTERNS = {
     "LinkedIn": re.compile(r"linkedin\.com/(company|in)/[a-z0-9\-_]+", re.I),
@@ -20,13 +23,15 @@ SOCIAL_PATTERNS = {
 # --- 1. HEARTBEAT ---
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Online", "version": "2.0.2"}
+    """ Confirms the Watcher is active in the Apophenic Substrate. """
+    return {"status": "LeadRadar Online", "version": "2.0.3"}
 
-# --- 2. THE WATCHER ENGINE (Unified) ---
+# --- 2. THE WATCHER ENGINE (Unified Logic) ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
+        browser = None
         try:
-            # Stealth launch to bypass Realtor.com and Business firewalls
+            # Enhanced Stealth Launch
             browser = await p.chromium.launch(
                 headless=True, 
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
@@ -36,36 +41,40 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             )
             page = await context.new_page()
             
+            # Identify the target (Lost Jerusalem Real Estate or Global Business)
             url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
             
-            # Navigate with a generous timeout for Railway's network
+            # Navigate to the target
             response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
+            # Check for bot blocks (The Ophanim Gate)
             if response.status == 403:
                 await browser.close()
-                return {"error": "Access Denied", "details": "The target site blocked the Watcher IP."}
+                return {"error": "Access Denied", "details": "The target site blocked the Railway IP address."}
 
-            await asyncio.sleep(2) 
+            await asyncio.sleep(3) # Let the 'Slurry' of data settle
             html = await page.content()
-            
-            # --- DATA EXTRACTION ---
             results = {"url": url, "status": "success"}
 
             if is_zip:
-                # Real Estate Arbitrage Logic
+                # --- REAL ESTATE LEAD ENRICHMENT ---
                 leads = []
                 cards = await page.query_selector_all("[data-testid='property-card']")
                 for card in cards[:10]:
                     addr = await card.query_selector("[data-label='pc-address']")
                     price = await card.query_selector("[data-label='pc-price']")
                     if addr and price:
-                        leads.append({"address": (await addr.inner_text()).strip(), "price": (await price.inner_text()).strip()})
+                        leads.append({
+                            "address": (await addr.inner_text()).strip(),
+                            "price": (await price.inner_text()).strip()
+                        })
                 results["real_estate_leads"] = leads
             else:
-                # Technographics & B2B Signal Logic
+                # --- TECHNOGRAPHICS & B2B SIGNALS ---
                 tech = []
                 if "shopify" in html.lower(): tech.append({"name": "Shopify", "category": "E-commerce"})
                 if "wordpress" in html.lower(): tech.append({"name": "WordPress", "category": "CMS"})
+                if "react" in html.lower(): tech.append({"name": "React", "category": "Frontend"})
                 
                 hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings"])
                 emails = list(set(EMAIL_PATTERN.findall(html)))[:3]
@@ -83,30 +92,45 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             return results
 
         except Exception as e:
-            if 'browser' in locals(): await browser.close()
+            if browser: await browser.close()
             return {"error": "Watcher Crash", "details": str(e)}
 
-# --- 3. ENDPOINTS ---
+# --- 3. THE ENDPOINTS ---
 
 @app.get("/analyze")
 @app.get("/analyze/")
 async def analyze_endpoint(url: str, request: Request):
+    """ Restored route for B2B Lead Enrichment & Technographics. """
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        return JSONResponse(status_code=403, content={"detail": "Unauthorized"})
+        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
+    
     async with MAX_CONCURRENT_SCANS:
         res = await run_lead_radar(url, is_zip=False)
-        return JSONResponse(status_code=200 if "error" not in res else 400, content=res)
+        status = 200 if "error" not in res else 400
+        return JSONResponse(status_code=status, content=res)
 
 @app.get("/leads/{zip_code}")
 @app.get("/leads/{zip_code}/")
 async def zip_leads_endpoint(zip_code: str, request: Request):
+    """ Specialized route for Real Estate Arbitrage. """
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        return JSONResponse(status_code=403, content={"detail": "Unauthorized"})
+        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
+
     async with MAX_CONCURRENT_SCANS:
         res = await run_lead_radar(zip_code, is_zip=True)
-        return JSONResponse(status_code=200 if "error" not in res else 400, content=res)
+        status = 200 if "error" not in res else 400
+        return JSONResponse(status_code=status, content=res)
 
-# --- 4. CATCH-ALL DEBUG ---
+# --- 4. THE CATCH-ALL (Final 404 Shield) ---
 @app.api_route("/{path_name:path}", methods=["GET"])
 async def catch_all(request: Request, path_name: str):
-    return {"error": "Path Not Found", "received_path": f"/{path_name}"}
+    return {
+        "error": "Path Not Found",
+        "received_path": f"/{path_name}",
+        "hint": "Ensure your RapidAPI Base URL has no trailing slash."
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
