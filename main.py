@@ -2,35 +2,42 @@ import os
 import re
 import asyncio
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
 app = FastAPI(title="LeadRadar Pro")
-# Critical: This stops FastAPI from redirecting /leads/90210 to /leads/90210/
-app.router.redirect_slashes = False 
+app.router.redirect_slashes = False
 
 MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
 
-# --- DEBUG MIDDLEWARE ---
+# --- 1. THE "GHOST" CATCHER (Middleware to fix 404s) ---
 @app.middleware("http")
-async def trace_404(request: Request, call_next):
+async def fix_double_slashes(request: Request, call_next):
+    # This detects if RapidAPI is sending //leads instead of /leads
+    path = request.url.path
+    if "//" in path:
+        new_path = path.replace("//", "/")
+        print(f"DEBUG: Redirecting double slash {path} to {new_path}")
+        # We don't redirect (which causes 404s in proxies), we just update the scope
+        request.scope["path"] = new_path
+    
     response = await call_next(request)
-    if response.status_code == 404:
-        print(f"WATCHER ALERT: 404 on path -> {request.url.path}")
     return response
 
-# --- 1. HEARTBEAT ---
+# --- 2. HEARTBEAT ---
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Online", "version": "2026.1.08"}
+    return {"status": "LeadRadar Online", "version": "2026.1.09"}
 
-# --- 2. THE WATCHER ENGINE ---
+# --- 3. THE WATCHER ENGINE ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
+        # Pre-installed via Dockerfile
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = await browser.new_context()
         page = await context.new_page()
         
-        # Real Estate Search (Stale Listings) or Standard Analyze
+        # Target: Realtor.com for Stale Real Estate Listings
         url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
         
         try:
@@ -56,15 +63,13 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             await browser.close()
             return {"error": str(e)}
 
-# --- 3. THE ENDPOINTS ---
+# --- 4. THE ENDPOINTS ---
 
-# Using explicit paths to catch both slash variants
 @app.get("/leads/{zip_code}")
-@app.get("/leads/{zip_code}/")
 async def zip_leads_endpoint(zip_code: str, request: Request):
-    # Check X-RapidAPI-Proxy-Secret variable in Railway
+    # Security: Check against Railway Variable
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
 
     async with MAX_CONCURRENT_SCANS:
         return await run_lead_radar(zip_code, is_zip=True)
