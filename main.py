@@ -7,8 +7,8 @@ from fastapi import FastAPI, Request, HTTPException
 from playwright.async_api import async_playwright
 
 # --- INITIALIZATION ---
-# Ensures the browser is ready on Railway deployment
 try:
+    # This ensures the browser binaries are installed on the Railway Linux container
     subprocess.run(["playwright", "install", "--with-deps", "chromium"], check=True)
 except Exception as e:
     print(f"Browser check: {e}")
@@ -16,9 +16,10 @@ except Exception as e:
 app = FastAPI(title="LeadRadar Pro")
 
 # --- GLOBAL CONFIG & GUARDS ---
-# Limit server to 3 browsers at once to protect RAM
+# Limit server to 3 concurrent browsers to stay within Railway RAM limits
 MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
 
+# Search Patterns
 SOCIAL_PATTERNS = {
     "LinkedIn": re.compile(r"linkedin\.com/(company|in)/[a-z0-9\-_]+", re.I),
     "X_Twitter": re.compile(r"(twitter\.com|x\.com)/[a-z0-9\-_]+", re.I),
@@ -26,9 +27,20 @@ SOCIAL_PATTERNS = {
 }
 EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
 
-# --- RESOURCE BLOCKER (Bandwidth Saver) ---
+# --- THE HEARTBEAT (Fixes Railway Healthcheck Failures) ---
+@app.get("/")
+async def health_check():
+    """Tells Railway the service is healthy and ready to accept traffic."""
+    return {
+        "status": "online",
+        "engine": "LeadRadar Pro",
+        "pricing_tier": "$15/mo Pro",
+        "message": "The Watcher is active."
+    }
+
+# --- BANDWIDTH PROTECTOR ---
 async def intercept_route(route):
-    """Aborts heavy assets to keep bandwidth < 1MB per scan."""
+    """Aborts images/css/media to save 90% bandwidth and boost speed."""
     if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
         await route.abort()
     else:
@@ -37,7 +49,7 @@ async def intercept_route(route):
 # --- THE WATCHER ENGINE ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
-        # Launch with Stealth Args
+        # Launch with Stealth Arguments
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
@@ -50,15 +62,15 @@ async def run_lead_radar(target: str, is_zip: bool = False):
         # Apply the Bandwidth Guard
         await page.route("**/*", intercept_route)
         
-        # Inject Stealth Script
+        # Inject Stealth Script to hide 'webdriver' presence
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
         
         try:
-            # Fast load for data extraction
+            # Fast load for data extraction (ignore images/css)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(2) # Allow JS hydration
+            await asyncio.sleep(2) # Give JS a moment to hydrate text data
             html = await page.content()
             
             # 1. REAL ESTATE SCRAPE (IF ZIP)
@@ -78,10 +90,11 @@ async def run_lead_radar(target: str, is_zip: bool = False):
 
             # 2. BUSINESS SIGNALS
             tech_found = []
-            if "shopify" in html.lower(): tech_found.append("Shopify")
-            if "facebook.net" in html.lower(): tech_found.append("Meta Pixel")
+            if "shopify" in html.lower(): tech_found.append({"name": "Shopify", "category": "E-commerce"})
+            if "facebook.net" in html.lower(): tech_found.append({"name": "Meta Pixel", "category": "Advertising"})
+            if "google-analytics" in html.lower(): tech_found.append({"name": "Google Analytics", "category": "Analytics"})
             
-            hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings"])
+            hiring = any(word in html.lower() for word in ["careers", "hiring", "job-openings", "work-with-us"])
             
             # 3. CONTACTS & SOCIALS
             emails = list(set(EMAIL_PATTERN.findall(html)))[:3]
@@ -110,11 +123,11 @@ async def run_lead_radar(target: str, is_zip: bool = False):
 
 @app.get("/analyze")
 async def analyze_endpoint(url: str, request: Request):
-    # RapidAPI Proxy Security
+    # RapidAPI Proxy Security Header Verification
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
         raise HTTPException(status_code=403, detail="Unauthorized Access")
     
-    # Apply Rate Guard (Semaphore)
+    # Internal Semaphore: Queues requests to prevent RAM overflow
     async with MAX_CONCURRENT_SCANS:
         return await run_lead_radar(url, is_zip=False)
 
@@ -127,4 +140,6 @@ async def zip_leads_endpoint(zip_code: str, request: Request):
         return await run_lead_radar(zip_code, is_zip=True)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # Pulls Port from Railway environment or defaults to 8080
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
