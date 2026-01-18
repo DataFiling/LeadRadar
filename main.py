@@ -1,43 +1,27 @@
 import os
-import re
 import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
 app = FastAPI(title="LeadRadar Pro")
+# Prevents automatic redirects that confuse RapidAPI proxies
 app.router.redirect_slashes = False
 
 MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
 
-# --- 1. THE "GHOST" CATCHER (Middleware to fix 404s) ---
-@app.middleware("http")
-async def fix_double_slashes(request: Request, call_next):
-    # This detects if RapidAPI is sending //leads instead of /leads
-    path = request.url.path
-    if "//" in path:
-        new_path = path.replace("//", "/")
-        print(f"DEBUG: Redirecting double slash {path} to {new_path}")
-        # We don't redirect (which causes 404s in proxies), we just update the scope
-        request.scope["path"] = new_path
-    
-    response = await call_next(request)
-    return response
-
-# --- 2. HEARTBEAT ---
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Online", "version": "2026.1.09"}
+    """Confirms the Watcher is active."""
+    return {"status": "LeadRadar Online", "version": "2026.1.10"}
 
-# --- 3. THE WATCHER ENGINE ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
-        # Pre-installed via Dockerfile
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = await browser.new_context()
         page = await context.new_page()
         
-        # Target: Realtor.com for Stale Real Estate Listings
+        # Realtor.com targeted search for 'Stale' Real Estate Listings
         url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
         
         try:
@@ -47,6 +31,7 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             
             leads = []
             if is_zip:
+                # Scrape property cards for the $15 lead tier
                 cards = await page.query_selector_all("[data-testid='property-card']")
                 for card in cards[:10]:
                     addr = await card.query_selector("[data-label='pc-address']")
@@ -61,18 +46,21 @@ async def run_lead_radar(target: str, is_zip: bool = False):
             return {"url": url, "real_estate_leads": leads, "status": "success"}
         except Exception as e:
             await browser.close()
-            return {"error": str(e)}
+            return {"error": "Observation failed", "details": str(e)}
 
-# --- 4. THE ENDPOINTS ---
-
+# --- THE SPECIFIC ROUTE ---
 @app.get("/leads/{zip_code}")
 async def zip_leads_endpoint(zip_code: str, request: Request):
-    # Security: Check against Railway Variable
+    # Verify the Secret from Railway Variables
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
         return JSONResponse(status_code=403, content={"detail": "Unauthorized Agent"})
+    return await run_lead_radar(zip_code, is_zip=True)
 
-    async with MAX_CONCURRENT_SCANS:
-        return await run_lead_radar(zip_code, is_zip=True)
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+# --- THE CATCH-ALL DEBUG (This stops the 404) ---
+@app.api_route("/{path_name:path}", methods=["GET"])
+async def catch_all(request: Request, path_name: str):
+    return {
+        "error": "Path Not Found",
+        "received_path": path_name,
+        "hint": "If you meant to use /leads/90210, ensure no double slashes are present."
+    }
