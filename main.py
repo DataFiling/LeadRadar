@@ -1,35 +1,39 @@
 import os
 import asyncio
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
 app = FastAPI(title="LeadRadar Pro")
-app.router.redirect_slashes = False
+MAX_CONCURRENT_SCANS = asyncio.Semaphore(2) # Lowered to 2 to save Railway RAM
 
-# Limits concurrent browsers to protect Railway RAM
-MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
-
-# --- 1. HEARTBEAT (Instant response for Railway) ---
 @app.get("/")
 async def health_check():
-    """ railway pings this to confirm the service is healthy """
-    return {"status": "LeadRadar Online", "version": "2.0.1"}
+    return {"status": "online"}
 
-# --- 2. THE WATCHER ENGINE ---
 async def run_lead_radar(target: str, is_zip: bool = False):
     async with async_playwright() as p:
-        # Browser is pre-installed via Dockerfile
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context()
-        page = await context.new_page()
-        
-        # Scrape Realtor.com for 'Stale' Real Estate Listings [cite: 2026-01-14]
-        url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
-        
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2) 
+            # We add specific 'stealth' arguments to prevent Realtor.com from blocking the scan
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            
+            url = f"https://www.realtor.com/realestateandhomes-search/{target}" if is_zip else target
+            
+            # Shorter timeout and better wait condition
+            response = await page.goto(url, wait_until="commit", timeout=45000)
+            
+            if response.status == 403:
+                await browser.close()
+                return {"error": "Access Denied by Realtor.com", "hint": "Realtor is blocking the server IP."}
+
+            await asyncio.sleep(3) # Let the 'Slurry' of data settle
             
             leads = []
             if is_zip:
@@ -42,30 +46,22 @@ async def run_lead_radar(target: str, is_zip: bool = False):
                             "address": (await addr.inner_text()).strip(),
                             "price": (await price.inner_text()).strip()
                         })
-            
-            await browser.close()
-            return {"url": url, "real_estate_leads": leads, "status": "success"}
-        except Exception as e:
-            await browser.close()
-            return {"error": str(e)}
 
-# --- 3. THE ENDPOINTS ---
+            await browser.close()
+            return {"url": url, "leads": leads, "status": "success"}
+            
+        except Exception as e:
+            # This prevents the 500 error and gives you the real error instead
+            return {"error": "Watcher Crash", "details": str(e)}
+
 @app.get("/leads/{zip_code}")
-@app.get("/leads/{zip_code}/")
 async def zip_leads_endpoint(zip_code: str, request: Request):
-    # Verify the Secret from Railway Variables
     if request.headers.get("X-RapidAPI-Proxy-Secret") != os.getenv("RAPIDAPI_PROXY_SECRET"):
         return JSONResponse(status_code=403, content={"detail": "Unauthorized"})
 
     async with MAX_CONCURRENT_SCANS:
-        return await run_lead_radar(zip_code, is_zip=True)
-
-# --- 4. DEBUG CATCH-ALL (Diagnoses 404s) ---
-@app.api_route("/{path_name:path}", methods=["GET"])
-async def catch_all(request: Request, path_name: str):
-    """ If you hit this, the path you're using doesn't match the routes above """
-    return {
-        "error": "Path Not Found",
-        "received_path": f"/{path_name}",
-        "hint": "Check if your Base URL in RapidAPI has an extra trailing slash."
-    }
+        result = await run_lead_radar(zip_code, is_zip=True)
+        # If the result contains an error, return a 400 instead of crashing with a 500
+        if "error" in result:
+            return JSONResponse(status_code=400, content=result)
+        return result
