@@ -8,24 +8,25 @@ from playwright.async_api import async_playwright
 app = FastAPI(title="LeadRadar Pro - B2B Intelligence")
 app.router.redirect_slashes = False
 
-MAX_CONCURRENT_SCANS = asyncio.Semaphore(3) # Increased back to 3 since B2B sites are lighter
+MAX_CONCURRENT_SCANS = asyncio.Semaphore(3)
 
 # --- ADVANCED SIGNAL PATTERNS ---
 PATTERNS = {
     "emails": re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I),
     "LinkedIn": re.compile(r"linkedin\.com/(company|in)/[a-z0-9\-_]+", re.I),
-    "X_Twitter": re.compile(r"(twitter\.com|x\.com)/[a-z0-9\-_]+", re.I),
     "Facebook_Pixel": re.compile(r"fbevents\.js|connect\.facebook\.net", re.I),
-    "Google_Ads": re.compile(r"googletagmanager\.com|googleadservices\.com", re.I),
-    "HubSpot": re.compile(r"js\.hs-scripts\.com|js\.hsadspixel\.net", re.I),
-    "Intercom": re.compile(r"widget\.intercom\.io", re.I)
+    "Google_Ads": re.compile(r"googletagmanager\.com|googleadservices\.com", re.I)
 }
 
 @app.get("/")
 async def health_check():
-    return {"status": "LeadRadar Intelligence Online", "version": "3.0.0"}
+    return {"status": "LeadRadar Intelligence Online", "version": "3.0.1"}
 
 async def run_deep_analysis(url: str):
+    # Ensure URL has a scheme (Stops 400s caused by bad input)
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     async with async_playwright() as p:
         browser = None
         try:
@@ -35,43 +36,38 @@ async def run_deep_analysis(url: str):
             )
             page = await context.new_page()
             
-            # Navigate to the target site
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            await asyncio.sleep(2) # Let the 'Slurry' settle
+            # Increased timeout to 60s to survive Railway's 'Slurry' network
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            
+            if response.status >= 400:
+                await browser.close()
+                return {"error": "Site Unreachable", "details": f"Target returned status {response.status}"}
+
+            await asyncio.sleep(2) 
             html = await page.content()
             
             # --- SIGNAL EXTRACTION ---
             detected_tech = []
             if PATTERNS["Facebook_Pixel"].search(html): detected_tech.append("Facebook Ads")
             if PATTERNS["Google_Ads"].search(html): detected_tech.append("Google Ads")
-            if PATTERNS["HubSpot"].search(html): detected_tech.append("HubSpot CRM")
-            if PATTERNS["Intercom"].search(html): detected_tech.append("Intercom Chat")
             if "shopify" in html.lower(): detected_tech.append("Shopify")
             
-            # Identify Hiring & Growth signals
-            growth_keywords = ["careers", "hiring", "press release", "news", "investors", "funding"]
-            active_signals = [word for word in growth_keywords if word in html.lower()]
-            
-            # Contact & Social Mining
-            socials = {k: PATTERNS[k].search(html).group(0) for k in ["LinkedIn", "X_Twitter"] if PATTERNS[k].search(html)}
-            emails = list(set(PATTERNS["emails"].findall(html)))[:5]
-            
-            # Scoring Logic (Max 100)
-            score = (len(detected_tech) * 15) + (len(active_signals) * 10) + (len(socials) * 5)
+            growth_signals = [w for w in ["careers", "hiring", "press", "funding"] if w in html.lower()]
+            emails = list(set(PATTERNS["emails"].findall(html)))[:3]
             
             await browser.close()
             return {
                 "url": url,
-                "lead_score": min(score, 100),
+                "lead_score": (len(detected_tech) * 20) + (len(growth_signals) * 10),
                 "technographics": detected_tech,
-                "growth_signals": active_signals,
-                "social_profiles": socials,
+                "growth_signals": growth_signals,
                 "contacts": {"emails": emails},
                 "status": "success"
             }
         except Exception as e:
             if browser: await browser.close()
-            return {"error": "Observation failed", "details": str(e)}
+            # This detail will show up in your 400 response
+            return {"error": "Watcher Error", "details": str(e)}
 
 @app.get("/analyze")
 @app.get("/analyze/")
@@ -81,12 +77,11 @@ async def analyze_endpoint(url: str, request: Request):
     
     async with MAX_CONCURRENT_SCANS:
         res = await run_deep_analysis(url)
-        return JSONResponse(status_code=200 if "error" not in res else 400, content=res)
+        # If the result has an error, we return 400 with the details
+        status_code = 200 if "error" not in res else 400
+        return JSONResponse(status_code=status_code, content=res)
 
-# --- CATCH-ALL TO GUIDE USERS ---
-@app.api_route("/{path_name:path}", methods=["GET"])
-async def catch_all(request: Request, path_name: str):
-    return {
-        "error": "Path Not Found",
-        "message": "This API now focuses exclusively on /analyze for high-fidelity B2B data."
-    }
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
