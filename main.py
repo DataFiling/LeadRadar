@@ -9,7 +9,7 @@ app = FastAPI(title="LeadRadar Pro - Production")
 
 # --- CONCURRENCY GUARD ---
 # Prevents Railway from crashing if multiple scans run at once
-MAX_SCANS = asyncio.Semaphore(3)
+MAX_SCANS = asyncio.Semaphore(1)
 
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com|net|org|io|biz|co|uk|ca)', re.I)
 AD_PIXELS = {"Facebook Ads": "fbevents.js", "Google Ads": "googletagmanager.com", "LinkedIn Ads": "snap.licdn.com"}
