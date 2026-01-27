@@ -7,8 +7,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Ensure Playwright browsers are installed (chromium only to save space)
+RUN playwright install chromium
+
 # Copy application code
 COPY . .
 
 # Railway uses the PORT variable
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
